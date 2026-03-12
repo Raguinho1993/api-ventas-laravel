@@ -9,19 +9,24 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Http\Request;
 use App\Http\Requests\StoreCategoryRequest;
 use App\Http\Requests\UpdateCategoryRequest;
+use Illuminate\Support\Facades\Cache; # para usar redis
 
 class CategoryController extends Controller
 {
+    private $cacheKey = 'categories_all'; # definimos el key que llevara el dato
     /**
      * Display a listing of the resource.
      */
     public function index()
     {
-        $categories = Category::all();
-        return response()->json([
-            'message' => 'Lista de categorias',
-            'data' => $categories,
-        ],200);
+        // Cache::remember hace 3 cosas:
+        // 1. Busca en Redis la llave 'categories_all'
+        // 2. Si NO existe, ejecuta el Category::all() y lo guarda por 1 hora (3600s)
+        // 3. Si SÍ existe, te lo entrega de inmediato sin tocar MySQL
+        $categories = Cache::remember($this->cacheKey, 3600, function(){
+            return Category::all();
+        });
+        return response()->json($categories, 200);
     }
 
     /**
@@ -29,18 +34,15 @@ class CategoryController extends Controller
      */
     public function store(StoreCategoryRequest $request)
     {
-       $data = $request->validated();
-       
+       $data = $request->validated(); # Valida en el StoreCategoryRequest
+        
+       $category = Category::create($data); # Guarda el dato
+        Cache::forget('categories_all'); # Limpia redis, lo que obliga al get a una nueva consulta   
 
-        $category = DB::transaction(function () use ($data){
-            return Category::create($data);
-        });
-            
         return response()->json([
             'message' => 'Categoria creada',
             'data' => $category,
-            ], 201);
-        
+            ], 201);  
     }
 
     /**
@@ -48,7 +50,14 @@ class CategoryController extends Controller
      */
     public function show($id)
     {
-        $category = Category::with('products')->findOrFail($id);
+    // 1. Creamos una llave ÚNICA para cada ID
+    // Por ejemplo: "category_show_1", "category_show_2", etc.
+        $key = 'category_show_' . $id; 
+
+        $category =  Cache::remember($key, 3600, function() use ($id){
+            return Category::with('products')->findOrFail($id);
+        });
+
         return response()->json([
             'message' => 'Categoria encontrada',
             'data' => $category,
@@ -60,15 +69,15 @@ class CategoryController extends Controller
      */
     public function update(UpdateCategoryRequest $request, $id)
     {
-        $category = Category::with('products')->findOrFail($id);
+        $category = Category::findOrFail($id);
 
-        $data = $request->validate();
+        $data = $request->validated();
 
-        $category = DB::transaction(function () use ($data, $category){
-            $category->update($data);
+        $category->update($data);
 
-            return $category;
-        });
+        Cache::forget('categories_all'); // Borramos la lista general
+        Cache::forget('category_show_'. $id);
+
         return response()->json([
             'message' => 'Categoria actualizada',
             'data' => $category,
@@ -80,17 +89,20 @@ class CategoryController extends Controller
      */
         public function destroy($id)
         {
+            // 1. Buscamos la categoría y sus productos
             $category = Category::with('products')->findOrFail($id);
+            // 2. Verificamos si tiene productos asociados
             if($category->products()->exists()){
                 return response()->json([
                 'message' => 'Error: No se puede eliminar una categoría que tiene productos asociados.'
             ], 400);
             }
+                
+            $category->delete();
+        
+            Cache::forget('categories_all');
+            Cache::forget('category_show_' . $id);
 
-            $category = DB::transaction(function () use($category){
-
-                $category->delete();
-            });
             return response()->json([
                 'message' => 'Categoria eliminada con exito',
                 
